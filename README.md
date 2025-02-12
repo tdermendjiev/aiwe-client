@@ -186,29 +186,43 @@ const agent = new AIWEAgent({
   openAIApiKey: process.env.OPENAI_API_KEY
 });
 
-// The agent automatically determines which websites to interact with
-await agent.execute("Get my current balance");  // Finds and uses Stripe's AIWE endpoint
-await agent.execute("Book the cheapest flight to San Francisco next Friday");  // Finds relevant airline websites
-await agent.execute("Order more inventory for products below 10 units");  // Discovers your e-commerce platform
+// Financial and payments
+await agent.execute("Get my Stripe balance");
+await agent.execute("Process refund for last Stripe payment");
+
+// Travel
+await agent.execute("Book the cheapest United flight to San Francisco next Friday");
+await agent.execute("Find available Delta flights to NYC under $300");
+
+// Shopping
+await agent.execute("Find AirPods Pro on Amazon");
 ```
 
 ### **4.2 Complex Workflows**
-AIWE intelligently handles multi-service workflows:
+AIWE handles multi-service workflows naturally:
 
 ```typescript
-// Agent automatically identifies and coordinates between airline, hotel, and calendar services
+// Travel planning
 await agent.execute(`
-  Plan my trip to NYC:
-  - Find a direct flight
-  - Book a hotel near Times Square
-  - Add everything to my calendar
+  Plan my trip:
+  - Find a direct United flight
+  - Book a Hilton hotel near Times Square
+  - Add everything to Google Calendar
 `);
 
-// Agent discovers relevant e-commerce and accounting platforms
+// Financial tracking
 await agent.execute(`
-  Generate a Q4 sales report and send it to my accountant
+  Process monthly tasks:
+  - Get all Stripe payments from last month
+  - Check Amazon orders status
+  - Add summary to Google Calendar
 `);
 ```
+
+If the agent needs clarification, it will ask:
+- "Which airline would you prefer to book with?"
+- "Would you like to include nearby airports in the search?"
+- "What's your preferred flight time?"
 
 The AIWE framework handles:
 - 🔍 Discovering relevant websites and services
