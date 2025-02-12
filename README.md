@@ -231,5 +231,40 @@ The AIWE framework handles:
 - 🔄 Coordinating across multiple services
 - ⚠️ Error handling and retries
 
+---
+
+## **5. Community Bridges**
+### **5.1 Overview**
+Community Bridges enable the AIWE framework to integrate with existing web services that haven't yet implemented native AIWE endpoints. These bridges act as translation layers, allowing AI agents to interact with traditional websites through standardized AIWE interfaces.
+
+### **5.2 Benefits**
+- **Immediate Integration** – Use AIWE with existing services before native implementation
+- **Community-Driven** – Open-source bridges maintained by the developer community
+- **Gradual Adoption** – Services can transition to native AIWE support at their own pace
+- **Backwards Compatibility** – Ensures AIWE works with legacy systems
+
+### **5.3 Example Bridge Implementation**
+```typescript
+import { AIWEBridge } from 'aiwe-bridge';
+
+// Example bridge for a traditional e-commerce site
+const amazonBridge = new AIWEBridge({
+  name: 'amazon',
+  actions: {
+    'search_products': {
+      execute: async (params) => {
+        // Bridge implementation for product search
+      }
+    },
+    'add_to_cart': {
+      execute: async (params) => {
+        // Bridge implementation for cart functionality
+      }
+    }
+  }
+});
+```
+
+
 
 
