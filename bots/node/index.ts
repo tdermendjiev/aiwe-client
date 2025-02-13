@@ -20,7 +20,7 @@ class StripeBot {
 (async () => {
   try {
     const stripeBot = new StripeBot();
-    const result = await stripeBot.executeCommand("Get my balance from stripe");
+    const result = await stripeBot.executeCommand("Get my balance from stripe.com");
     console.log("Result:", result);
   } catch (error) {
     console.error("Error:", error);

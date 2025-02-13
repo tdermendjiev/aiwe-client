@@ -1,5 +1,6 @@
 import Stripe from 'stripe';
 import dotenv from 'dotenv';
+import { CommunityBridge } from '../lib/aiwe-bot';
 
 dotenv.config();
 
@@ -52,3 +53,59 @@ export class StripeAIWE {
     }
   }
 }
+
+export const stripeBridge: CommunityBridge = {
+  config: {
+    actions: [
+      {
+        id: 'getBalance',
+        name: 'Get Balance',
+        description: 'Retrieve the current balance from Stripe'
+      },
+      {
+        id: 'listPayments',
+        name: 'List Payments',
+        description: 'List recent payment intents',
+        parameters: {
+          limit: { type: 'number', optional: true }
+        }
+      },
+      {
+        id: 'createPayment',
+        name: 'Create Payment',
+        description: 'Create a new payment intent',
+        parameters: {
+          amount: { type: 'number', required: true },
+          currency: { type: 'string', required: true },
+          description: { type: 'string', required: true }
+        }
+      },
+      {
+        id: 'refundPayment',
+        name: 'Refund Payment',
+        description: 'Refund a payment intent',
+        parameters: {
+          paymentIntentId: { type: 'string', required: true }
+        }
+      }
+    ]
+  },
+  implementation: {
+    getBalance: async () => {
+      const stripe = new StripeAIWE();
+      return await stripe.getBalance();
+    },
+    listPayments: async (params: { limit?: number }) => {
+      const stripe = new StripeAIWE();
+      return await stripe.listPayments(params.limit);
+    },
+    createPayment: async (params: { amount: number; currency: string; description: string }) => {
+      const stripe = new StripeAIWE();
+      return await stripe.createPayment(params.amount, params.currency, params.description);
+    },
+    refundPayment: async (params: { paymentIntentId: string }) => {
+      const stripe = new StripeAIWE();
+      return await stripe.refundPayment(params.paymentIntentId);
+    }
+  }
+};

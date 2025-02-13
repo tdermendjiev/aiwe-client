@@ -6,6 +6,15 @@ interface AIWEBotOptions {
   openAIApiKey: string;
 }
 
+interface BridgeImplementation {
+  [key: string]: (params: any) => Promise<any>;
+}
+
+export interface CommunityBridge {
+  config: any;
+  implementation: BridgeImplementation;
+}
+
 export class AIWEBot {
   private openai: OpenAI;
   private configSources = new Map<string, 'official' | 'bridge'>();
@@ -73,7 +82,7 @@ export class AIWEBot {
       return config;
     } catch (error) {
       // Fallback to community bridge
-      const bridge = communityBridges[website];
+      const bridge = communityBridges[website] as CommunityBridge;
       if (bridge) {
         this.configSources.set(website, 'bridge');
         return bridge.config;
@@ -120,24 +129,27 @@ export class AIWEBot {
       messages: [
         { 
           role: "system", 
-          content: `You must respond with a JSON array of actions in the correct execution order.
+          content: `You must respond with a JSON object containing an array of actions in the correct execution order.
           For actions that depend on previous actions' outputs, specify the dependency in the 'dependsOn' field.
           Example JSON format:
-          [
-            { "id": "get_invoices", "website": "stripe.com", "parameters": {}, "outputKey": "stripe_invoices" },
-            { "id": "upload_document", "website": "dropbox.com", "parameters": { "file": "$outputs.stripe_invoices[0]" }, "dependsOn": ["stripe_invoices"] }
-          ]
-          If no suitable actions exist, respond with [].` 
+          {
+            "actions": [
+              { "id": "get_invoices", "website": "stripe.com", "parameters": {}, "outputKey": "stripe_invoices" },
+              { "id": "upload_document", "website": "dropbox.com", "parameters": { "file": "$outputs.stripe_invoices[0]" }, "dependsOn": ["stripe_invoices"] }
+            ]
+          }
+          If no suitable actions exist, respond with {"actions": []}.` 
         },
         { 
           role: "user", 
-          content: `Respond with a JSON array. Instruction: ${instruction}\nAvailable actions per website: ${JSON.stringify(Object.fromEntries(configs))}` 
+          content: `Instruction: ${instruction}\nAvailable actions per website: ${JSON.stringify(Object.fromEntries(configs))}` 
         }
       ],
       response_format: { type: "json_object" }
     });
 
-    const actionPlan = JSON.parse(actionPlanResponse.choices[0].message.content || "[]");
+    const response = JSON.parse(actionPlanResponse.choices[0].message.content || '{"actions": []}');
+    const actionPlan = response.actions;
     if (!actionPlan.length) {
       throw new Error("No suitable actions available to complete this instruction.");
     }
@@ -174,7 +186,12 @@ export class AIWEBot {
   private async executePlan(actionPlan: any[], configs: Map<string, any>): Promise<any[]> {
     const orderedPlan = this.reorderActionPlan(actionPlan);
     const outputs = new Map();
-    const results: any[] = [];
+    const chatHistory: { role: "system" | "assistant" | "user", content: string }[] = [
+      {
+        role: "system",
+        content: "You are a helpful assistant that explains technical results in a clear, human-readable way. Each response should build upon previous context."
+      }
+    ];
     
     for (const action of orderedPlan) {
       if (action.dependsOn) {
@@ -196,11 +213,36 @@ export class AIWEBot {
       if (action.outputKey) {
         outputs.set(action.outputKey, result);
       }
-      
-      results.push(result);
+
+      chatHistory.push({
+        role: "user",
+        content: `Action "${action.id}" on ${action.website} returned: ${JSON.stringify(result)}`
+      });
+
+      const response = await this.openai.chat.completions.create({
+        model: "gpt-4o",
+        messages: chatHistory
+      });
+
+      const interpretation = response.choices[0].message.content || "No interpretation available";
+      chatHistory.push({
+        role: "assistant",
+        content: interpretation
+      });
     }
 
-    return results;
+    const finalResponse = await this.openai.chat.completions.create({
+      model: "gpt-4o",
+      messages: [
+        ...chatHistory,
+        {
+          role: "user",
+          content: "Please provide a final summary of all the actions and their results."
+        }
+      ]
+    });
+
+    return [finalResponse.choices[0].message.content || "No results to summarize"];
   }
 
   private async executeAction(actionId: string, website: string, params: any, config: any): Promise<any> {
@@ -216,7 +258,7 @@ export class AIWEBot {
       }
       
       // Must be a bridge at this point
-      const bridge = communityBridges[website];
+      const bridge = communityBridges[website] as CommunityBridge;
       if (!bridge) {
         throw new Error(`No implementation available for ${website}`);
       }
