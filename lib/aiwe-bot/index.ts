@@ -59,10 +59,48 @@ interface AuthConfig {
   }>;
 }
 
+interface StoredData {
+  actions: {
+    [actionId: string]: {
+      website: string;
+      result: any;
+      timestamp: number;
+      parameters: any;
+    }
+  };
+  conversations: {
+    timestamp: number;
+    instruction: string;
+    response: string;
+  }[];
+}
+
+interface DataReference {
+  actions: {
+    [actionId: string]: {
+      description: string;
+      timestamp: number;
+    }
+  };
+  conversations: {
+    count: number;
+    lastTimestamp: number;
+  };
+}
+
+interface DataRequest {
+  id: string;
+  reason: string;
+}
+
 export class AIWEBot {
   private openai: OpenAI;
   private configSources = new Map<string, 'official' | 'bridge' | 'aiwe.cloud'>();
   private serviceCredentials: Record<string, Record<string, string>>;
+  private dataStore: StoredData = {
+    actions: {},
+    conversations: []
+  };
 
   constructor(options: AIWEBotOptions) {
     this.openai = new OpenAI({ apiKey: options.openAIApiKey });
@@ -93,6 +131,14 @@ export class AIWEBot {
   }
 
   async processInstruction(instruction: string): Promise<ConversationResponse> {
+    // Store the instruction
+    const timestamp = Date.now();
+    this.dataStore.conversations.push({
+      timestamp,
+      instruction,
+      response: '' // Will be updated later
+    });
+
     let context: ExecutionContext = {
       instruction,
       conversationHistory: '',
@@ -106,9 +152,18 @@ export class AIWEBot {
         messages: [
           {
             role: "system",
-            content: `Analyze if this instruction requires executing actions on websites or is just a question/conversation. Respond in json
-            with the following format: {"requiresAction": true|false, "response": "your message"}
-              Previous context: ${context.conversationHistory}`
+            content: `Analyze if this instruction requires executing actions on websites or is just a question/conversation.
+              Available data reference:
+              ${JSON.stringify(this.getDataReference(), null, 2)}
+
+              If you need specific data, include "dataNeeded": ["action-id"] in your response.
+              
+              Respond in json with format: {
+                "requiresAction": true|false,
+                "response": "your message",
+                "dataNeeded": ["list of action IDs if you need their data"],
+                "reason": "why you need this data (if any)"
+              }`
           },
           {
             role: "user",
@@ -118,8 +173,36 @@ export class AIWEBot {
         response_format: { type: "json_object" }
       });
 
-      const analysis = JSON.parse(analysisResponse.choices[0].message?.content || "{}");
+      let analysis = JSON.parse(analysisResponse.choices[0].message?.content || "{}");
       
+      // If the agent needs data, collect it all first
+      let collectedData = {};
+      if (analysis.dataNeeded?.length) {
+        collectedData = await this.collectRequestedData(analysis.dataNeeded);
+        
+        // Now make the final decision with all data
+        const finalAnalysis = await this.openai.chat.completions.create({
+          model: "gpt-4o-mini",
+          messages: [
+            {
+              role: "system",
+              content: `Analyze the instruction with all requested historical data:
+                Original instruction: ${instruction}
+                Requested data: ${JSON.stringify(collectedData, null, 2)}
+                
+                Provide your final analysis in JSON format: {
+                  "requiresAction": true|false,
+                  "response": "your message",
+                  "relevantContext": "how the historical data influences your decision"
+                }`
+            }
+          ],
+          response_format: { type: "json_object" }
+        });
+
+        analysis = JSON.parse(finalAnalysis.choices[0].message?.content || "{}");
+      }
+
       // If it's just a conversation, respond directly
       if (!analysis.requiresAction) {
         return {
@@ -218,7 +301,7 @@ export class AIWEBot {
       }
 
       // If we have everything we need, execute the plan
-      const results = await this.executePlan(planResult.plan.actions, configs, context.completedActions);
+      const results = await this.executePlan(planResult.plan.actions, configs, context.instruction, context.completedActions);
 
       // Return both the execution results and a human-readable summary
       return {
@@ -357,24 +440,20 @@ export class AIWEBot {
   private async executePlan(
     actionPlan: any[], 
     configs: Map<string, any>,
+    instruction: string,
     completedActions?: Map<string, { website: string; result: any; timestamp: number; }>
   ): Promise<any[]> {
     const orderedPlan = this.reorderActionPlan(actionPlan);
     const outputs = new Map();
-    const chatHistory: { role: "system" | "assistant" | "user", content: string }[] = [
-      {
-        role: "system",
-        content: "You are a helpful assistant that explains technical results in a clear, human-readable way. Each response should build upon previous context."
-      }
-    ];
-    
-    // Initialize outputs with results from previously completed actions
-    if (completedActions) {
-      for (const [actionId, action] of completedActions.entries()) {
-        outputs.set(actionId, action.result);
-      }
-    }
-    
+    const chatHistory: { role: "system" | "assistant" | "user", content: string }[] = [];
+    const actionResults: Array<{
+      id: string;
+      status: 'success' | 'failure';
+      result?: any;
+      error?: string;
+    }> = [];
+
+    // Execute all actions first
     for (const action of orderedPlan) {
       // Skip if action was already completed successfully (unless it's marked as required to repeat)
       const previousExecution = completedActions?.get(action.id);
@@ -478,48 +557,51 @@ export class AIWEBot {
           timestamp: Date.now()
         });
 
-        chatHistory.push({
-          role: "user",
-          content: `Action "${action.id}" on ${action.website} returned: ${JSON.stringify(actionResult.result)}`
+        // Store in our results array
+        actionResults.push({
+          id: action.id,
+          status: 'success',
+          result: actionResult.result
         });
 
-        // Get interpretation of the result
-        const response = await this.openai.chat.completions.create({
-          model: "gpt-4o-mini",
-          messages: [
-            ...chatHistory,
-            {
-              role: "system",
-              content: `Interpret the result of the action and provide a clear explanation. 
-                Return your response in JSON format: {"response": "your interpretation"}`
-            }
-          ],
-          response_format: { type: "json_object" }
-        });
-
-        const interpretationResult = JSON.parse(response.choices[0].message?.content || "{}");
-        chatHistory.push({
-          role: "assistant",
-          content: interpretationResult.response || "No interpretation available"
+        // Store the action result
+        this.dataStore.actions[action.id] = {
+          website: action.website,
+          result: actionResult.result,
+          timestamp: Date.now(),
+          parameters: resolvedParams
+        };
+      } else {
+        actionResults.push({
+          id: action.id,
+          status: 'failure',
+          error: actionResult.error
         });
       }
     }
 
-    // After all actions are complete, get a final summary and suggestions
+    // Now process all results at once
     const finalResponse = await this.openai.chat.completions.create({
       model: "gpt-4o-mini",
       messages: [
-        ...chatHistory,
         {
           role: "system",
-          content: `Review all the actions and their results above. Provide a response in JSON format:
-            {
-              "summary": "Brief summary of what was accomplished",
+          content: `Analyze all executed actions and their results:
+            Action Results: ${JSON.stringify(actionResults, null, 2)}
+            
+            Available data reference:
+            ${JSON.stringify(this.getDataReference(), null, 2)}
+
+            If you need additional historical data to provide better context, include "dataNeeded" in your response.
+            
+            Provide a complete analysis in JSON format: {
+              "summary": "Complete summary of what was accomplished",
               "results": {
-                "successful": ["List of successful actions"],
-                "failed": ["List of failed actions if any"]
+                "successful": ["List of successful actions with their outcomes"],
+                "failed": ["List of failed actions with error details"]
               },
-              "suggestions": ["List of possible next steps or related actions the user might want to take"]
+              "dataNeeded": ["IDs of relevant historical actions to consider"],
+              "reason": "Why you need this historical data"
             }`
         }
       ],
@@ -527,24 +609,46 @@ export class AIWEBot {
     });
 
     const finalResult = JSON.parse(finalResponse.choices[0].message?.content || "{}");
-    
-    // Add the summary to chat history
-    chatHistory.push({
-      role: "assistant",
-      content: `${finalResult.summary}\n\n${
-        finalResult.results.failed.length > 0 
-          ? `Failed actions: ${finalResult.results.failed.join(", ")}\n` 
-          : ""
-      }${
-        finalResult.suggestions.length > 0
-          ? `\nSuggested next steps:\n${finalResult.suggestions.map((s: any) => `- ${s}`).join("\n")}`
-          : ""
-      }`
-    });
 
-    return chatHistory
-      .filter(msg => msg.role === "assistant")
-      .map(msg => msg.content);
+    // If historical data is needed, get it all at once
+    if (finalResult.dataNeeded?.length) {
+      const historicalData = await this.collectRequestedData(finalResult.dataNeeded);
+
+      // Final analysis with all data
+      const completeResponse = await this.openai.chat.completions.create({
+        model: "gpt-4o-mini",
+        messages: [
+          {
+            role: "system",
+            content: `Provide final analysis with all context:
+              Current Results: ${JSON.stringify(actionResults, null, 2)}
+              Historical Data: ${JSON.stringify(historicalData, null, 2)}
+              
+              Provide complete analysis in JSON format: {
+                "summary": "Complete summary including historical context",
+                "results": {
+                  "successful": ["List of successful actions with outcomes"],
+                  "failed": ["List of failed actions with reasons"]
+                },
+                "suggestions": ["List of possible next steps"],
+                "context": "How historical data relates to current results"
+              }`
+          }
+        ],
+        response_format: { type: "json_object" }
+      });
+
+      const completeResult = JSON.parse(completeResponse.choices[0].message?.content || "{}");
+      
+      // Store the final response
+      this.dataStore.conversations[this.dataStore.conversations.length - 1].response = completeResult.summary;
+
+      return [completeResult.summary];
+    }
+
+    // If no historical data needed, use the initial final result
+    this.dataStore.conversations[this.dataStore.conversations.length - 1].response = finalResult.summary;
+    return [finalResult.summary];
   }
 
   private resolveAuthHeaders(service: string, authConfig: any): Record<string, string> {
@@ -657,5 +761,35 @@ export class AIWEBot {
     }
 
     return resolvedParams;
+  }
+
+  private getDataReference(): DataReference {
+    return {
+      actions: Object.entries(this.dataStore.actions).reduce((ref, [id, action]) => {
+        ref[id] = {
+          description: `Action ${id} on ${action.website} with parameters: ${Object.keys(action.parameters).join(', ')}`,
+          timestamp: action.timestamp
+        };
+        return ref;
+      }, {} as DataReference['actions']),
+      conversations: {
+        count: this.dataStore.conversations.length,
+        lastTimestamp: this.dataStore.conversations[this.dataStore.conversations.length - 1]?.timestamp || 0
+      }
+    };
+  }
+
+  private async getRelevantData(id: string): Promise<any> {
+    return this.dataStore.actions[id] || null;
+  }
+
+  private async collectRequestedData(dataNeeded: DataRequest[]): Promise<Record<string, any>> {
+    const collectedData: Record<string, any> = {};
+    
+    for (const request of dataNeeded) {
+      collectedData[request.id] = await this.getRelevantData(request.id);
+    }
+
+    return collectedData;
   }
 }
