@@ -1,97 +1,9 @@
 import { OpenAI } from "openai";
 import axios from "axios";
 import { communityBridges } from "./community-bridges";
-
-interface AIWEBotOptions {
-  openAIApiKey: string;
-  serviceCredentials?: Record<string, Record<string, string>>;  // e.g. { "invbg": { "x-api-key": "key123" } }
-}
-
-interface BridgeImplementation {
-  [key: string]: (params: any) => Promise<any>;
-}
-
-export interface CommunityBridge {
-  config: any;
-  implementation: BridgeImplementation;
-}
-
-interface WebsiteInfo {
-  url: string;
-  serviceName: string;
-}
-
-interface AgentResponse<T> {
-  status: 'complete' | 'needsClarification';
-  data?: T;
-  question?: string;
-}
-
-interface ExecutionContext {
-  instruction: string;
-  conversationHistory: string;
-  completedActions?: Map<string, {
-    website: string;
-    result: any;
-    timestamp: number;
-  }>;
-}
-
-interface ActionResult {
-  status: 'success' | 'error';
-  action: string;
-  website: string;
-  result?: any;
-  error?: string;
-  retryCount?: number;
-}
-
-interface ConversationResponse {
-  response: string;
-  executionResults?: any;
-}
-
-interface AuthConfig {
-  type: string;
-  options: Array<{
-    name: string;
-    headers?: Record<string, string>;
-  }>;
-}
-
-interface StoredData {
-  actions: {
-    [actionId: string]: {
-      website: string;
-      result: any;
-      timestamp: number;
-      parameters: any;
-    }
-  };
-  conversations: {
-    timestamp: number;
-    instruction: string;
-    response: string;
-  }[];
-}
-
-interface DataReference {
-  actions: {
-    [actionId: string]: {
-      description: string;
-      timestamp: number;
-    }
-  };
-  conversations: {
-    count: number;
-    lastTimestamp: number;
-  };
-}
-
-interface DataRequest {
-  id: string;
-  reason: string;
-}
+import { AIWEBotOptions, ExecutionContext, AgentResponse, WebsiteInfo, ConversationResponse, StoredData, DataReference, CommunityBridge, ActionResult, DataRequest } from "./types";
+import Utils from "./utils";
+import { Prompts } from './prompts';
 
 export class AIWEBot {
   private openai: OpenAI;
@@ -110,20 +22,7 @@ export class AIWEBot {
   private async determineWebsitesWithContext(context: ExecutionContext): Promise<AgentResponse<WebsiteInfo[]>> {
     const response = await this.openai.chat.completions.create({
       model: "gpt-4o-mini",
-      messages: [
-        { 
-          role: "system", 
-          content: `You are a helpful assistant that identifies website URLs and their service names from user instructions. 
-            If you need clarification, respond with the following json format: {"status": "needsClarification", "question": "your question"}.
-            If you can determine the websites, respond with {"status": "complete", "data": [{"url": "website.com", "serviceName": "website"}]}.
-            For example, for mixpanel.com the serviceName would be "mixpanel".
-            Previous context: ${context.conversationHistory}`
-        },
-        { 
-          role: "user", 
-          content: context.instruction 
-        }
-      ],
+      messages: Prompts.websiteIdentification(context),
       response_format: { type: "json_object" }
     });
 
@@ -149,27 +48,7 @@ export class AIWEBot {
       // First, analyze if this is an actionable instruction or just a question
       const analysisResponse = await this.openai.chat.completions.create({
         model: "gpt-4o-mini",
-        messages: [
-          {
-            role: "system",
-            content: `Analyze if this instruction requires executing actions on websites or is just a question/conversation.
-              Available data reference:
-              ${JSON.stringify(this.getDataReference(), null, 2)}
-
-              If you need specific data, include "dataNeeded": ["action-id"] in your response.
-              
-              Respond in json with format: {
-                "requiresAction": true|false,
-                "response": "your message",
-                "dataNeeded": ["list of action IDs if you need their data"],
-                "reason": "why you need this data (if any)"
-              }`
-          },
-          {
-            role: "user",
-            content: instruction
-          }
-        ],
+        messages: Prompts.actionAnalysis(instruction, this.getDataReference()),
         response_format: { type: "json_object" }
       });
 
@@ -183,20 +62,7 @@ export class AIWEBot {
         // Now make the final decision with all data
         const finalAnalysis = await this.openai.chat.completions.create({
           model: "gpt-4o-mini",
-          messages: [
-            {
-              role: "system",
-              content: `Analyze the instruction with all requested historical data:
-                Original instruction: ${instruction}
-                Requested data: ${JSON.stringify(collectedData, null, 2)}
-                
-                Provide your final analysis in JSON format: {
-                  "requiresAction": true|false,
-                  "response": "your message",
-                  "relevantContext": "how the historical data influences your decision"
-                }`
-            }
-          ],
+          messages: Prompts.instructionAnalysis(instruction, collectedData),
           response_format: { type: "json_object" }
         });
 
@@ -229,14 +95,7 @@ export class AIWEBot {
           const errorMessage = error instanceof Error ? error.message : 'Unknown error occurred';
           const response = await this.openai.chat.completions.create({
             model: "gpt-4o-mini",
-            messages: [
-              {
-                role: "system",
-                content: `Error occurred while getting config for ${website.serviceName}: ${errorMessage}. 
-                  Analyze the error and provide a helpful response to the user about the issue and possible next steps.
-                  Return your response in JSON format: {"response": "your message"}`
-              }
-            ],
+            messages: Prompts.configError(website.serviceName, errorMessage),
             response_format: { type: "json_object" }
           });
           
@@ -250,44 +109,7 @@ export class AIWEBot {
       // Action planning step
       const planResponse = await this.openai.chat.completions.create({
         model: "gpt-4o-mini",
-        messages: [
-          {
-            role: "system",
-            content: `Plan actions based on available configurations. 
-              If you need any clarification about parameters or specifics, respond with:
-              {"status": "needsInfo", "question": "your question"}
-
-              If you have everything needed, respond with:
-              {
-                "status": "complete",
-                "plan": {
-                  "actions": [
-                    {
-                      "id": "actionName",                 // The name of the action from the config
-                      "website": "service.com",           // The website URL
-                      "parameters": {},                   // Parameters required by the action
-                      "dependsOn": ["previousActionId"],  // Optional: IDs of actions this depends on
-                      "outputKey": "uniqueKey",          // Optional: key to store the output for other actions
-                      "alwaysExecute": false             // Optional: whether to execute even if previously completed
-                    }
-                  ]
-                }
-              }
-
-              Consider these already completed actions (don't repeat unless necessary):
-              ${Array.from(context.completedActions?.entries() || [])
-                .map(([id, action]) => `${id} on ${action.website} (${new Date(action.timestamp).toISOString()})`)
-                .join('\n')}
-              Previous context: ${context.conversationHistory}`
-          },
-          {
-            role: "user",
-            content: `Instruction: ${context.instruction}
-              Available actions: ${JSON.stringify(Object.fromEntries(configs))}
-              Previous results: ${JSON.stringify(Object.fromEntries(context.completedActions || new Map()))}
-              Respond in json format as specified above.`
-          }
-        ],
+        messages: Prompts.actionPlanning(context, Object.fromEntries(configs), context.completedActions),
         response_format: { type: "json_object" }
       });
 
@@ -327,7 +149,7 @@ export class AIWEBot {
       const response = await axios.get(`https://${serviceName}.com/.aiwe`);
       const config = response.data;
       
-      if (!this.isValidAIWEConfig(config)) {
+      if (!Utils.isValidAIWEConfig(config)) {
         throw new Error(`Invalid AIWE configuration format from ${serviceName}`);
       }
       
@@ -339,7 +161,7 @@ export class AIWEBot {
         const cloudResponse = await axios.get(`http://localhost:3000/${serviceName}/.aiwe`);
         const cloudConfig = cloudResponse.data;
 
-        if (!this.isValidAIWEConfig(cloudConfig)) {
+        if (!Utils.isValidAIWEConfig(cloudConfig)) {
           throw new Error(`Invalid AIWE configuration format from aiwe.cloud/${serviceName}`);
         }
 
@@ -358,100 +180,16 @@ export class AIWEBot {
     }
   }
 
-  private isValidAIWEConfig(config: any): boolean {
-    if (!config || typeof config !== 'object') return false;
-    
-    // Check required top-level fields
-    if (typeof config.service !== 'string' ||
-        typeof config.description !== 'string' ||
-        !Array.isArray(config.actions)) {
-      return false;
-    }
-    
-    // Validate each action
-    return config.actions.every((action: any) => {
-      if (typeof action.name !== 'string' ||
-          typeof action.description !== 'string') {
-        return false;
-      }
-
-      // Validate parameters if they exist
-      if (action.parameters) {
-        if (typeof action.parameters !== 'object') return false;
-
-        // Check each parameter
-        return Object.entries(action.parameters).every(([_, param]: [string, any]) => {
-          if (!param || typeof param !== 'object') return false;
-          
-          // Required fields for a parameter
-          if (typeof param.type !== 'string') return false;
-          if ('required' in param && typeof param.required !== 'boolean') return false;
-
-          // If it's an array type, validate items structure
-          if (param.type === 'array' && param.items) {
-            if (typeof param.items !== 'object') return false;
-            
-            // Validate each item parameter
-            return Object.entries(param.items).every(([_, itemParam]: [string, any]) => {
-              if (!itemParam || typeof itemParam !== 'object') return false;
-              if (typeof itemParam.type !== 'string') return false;
-              if ('required' in itemParam && typeof itemParam.required !== 'boolean') return false;
-              return true;
-            });
-          }
-
-          // If enum is specified, it must be an array
-          if ('enum' in param && !Array.isArray(param.enum)) return false;
-
-          return true;
-        });
-      }
-
-      return true;
-    });
-  }
-
-  private reorderActionPlan(actionPlan: any[]): any[] {
-    const orderedPlan: any[] = [];
-    const availableOutputs = new Set<string>();
-    const unprocessedActions = [...actionPlan];
-
-    while (unprocessedActions.length > 0) {
-      const actionIndex = unprocessedActions.findIndex(action => {
-        return !action.dependsOn || 
-               action.dependsOn.every((dep: string) => availableOutputs.has(dep));
-      });
-
-      if (actionIndex === -1) {
-        throw new Error("Circular dependency detected in action plan");
-      }
-
-      const nextAction = unprocessedActions.splice(actionIndex, 1)[0];
-      orderedPlan.push(nextAction);
-
-      if (nextAction.outputKey) {
-        availableOutputs.add(nextAction.outputKey);
-      }
-    }
-
-    return orderedPlan;
-  }
-
   private async executePlan(
     actionPlan: any[], 
     configs: Map<string, any>,
     instruction: string,
     completedActions?: Map<string, { website: string; result: any; timestamp: number; }>
   ): Promise<any[]> {
-    const orderedPlan = this.reorderActionPlan(actionPlan);
+    const orderedPlan = Utils.reorderActionPlan(actionPlan);
     const outputs = new Map();
     const chatHistory: { role: "system" | "assistant" | "user", content: string }[] = [];
-    const actionResults: Array<{
-      id: string;
-      status: 'success' | 'failure';
-      result?: any;
-      error?: string;
-    }> = [];
+    const actionResults: ActionResult[] = [];
 
     // Execute all actions first
     for (const action of orderedPlan) {
@@ -514,17 +252,7 @@ export class AIWEBot {
 
             const response = await this.openai.chat.completions.create({
               model: "gpt-4o-mini",
-              messages: [
-                ...chatHistory,
-                {
-                  role: "system",
-                  content: `The action has failed. Analyze if:
-                    1. The error is fatal and we should stop execution
-                    2. We can skip this action and continue with the rest
-                    3. We need to modify the action and retry
-                    Respond with json with format: {"decision": "stop|continue|retry", "reason": "explanation"}`
-                }
-              ],
+              messages: Prompts.errorHandling(actionResult.error || 'Unknown error', chatHistory),
               response_format: { type: "json_object" }
             });
 
@@ -559,8 +287,9 @@ export class AIWEBot {
 
         // Store in our results array
         actionResults.push({
-          id: action.id,
           status: 'success',
+          action: action.id,
+          website: action.website,
           result: actionResult.result
         });
 
@@ -573,8 +302,9 @@ export class AIWEBot {
         };
       } else {
         actionResults.push({
-          id: action.id,
-          status: 'failure',
+          status: 'error',
+          action: action.id,
+          website: action.website,
           error: actionResult.error
         });
       }
@@ -583,28 +313,7 @@ export class AIWEBot {
     // Now process all results at once
     const finalResponse = await this.openai.chat.completions.create({
       model: "gpt-4o-mini",
-      messages: [
-        {
-          role: "system",
-          content: `Analyze all executed actions and their results:
-            Action Results: ${JSON.stringify(actionResults, null, 2)}
-            
-            Available data reference:
-            ${JSON.stringify(this.getDataReference(), null, 2)}
-
-            If you need additional historical data to provide better context, include "dataNeeded" in your response.
-            
-            Provide a complete analysis in JSON format: {
-              "summary": "Complete summary of what was accomplished",
-              "results": {
-                "successful": ["List of successful actions with their outcomes"],
-                "failed": ["List of failed actions with error details"]
-              },
-              "dataNeeded": ["IDs of relevant historical actions to consider"],
-              "reason": "Why you need this historical data"
-            }`
-        }
-      ],
+      messages: Prompts.finalAnalysis(actionResults, this.getDataReference()),
       response_format: { type: "json_object" }
     });
 
@@ -617,24 +326,7 @@ export class AIWEBot {
       // Final analysis with all data
       const completeResponse = await this.openai.chat.completions.create({
         model: "gpt-4o-mini",
-        messages: [
-          {
-            role: "system",
-            content: `Provide final analysis with all context:
-              Current Results: ${JSON.stringify(actionResults, null, 2)}
-              Historical Data: ${JSON.stringify(historicalData, null, 2)}
-              
-              Provide complete analysis in JSON format: {
-                "summary": "Complete summary including historical context",
-                "results": {
-                  "successful": ["List of successful actions with outcomes"],
-                  "failed": ["List of failed actions with reasons"]
-                },
-                "suggestions": ["List of possible next steps"],
-                "context": "How historical data relates to current results"
-              }`
-          }
-        ],
+        messages: Prompts.finalAnalysisWithHistory(actionResults, historicalData),
         response_format: { type: "json_object" }
       });
 
@@ -793,3 +485,5 @@ export class AIWEBot {
     return collectedData;
   }
 }
+
+export { CommunityBridge } from './types';
