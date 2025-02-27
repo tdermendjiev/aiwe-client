@@ -8,7 +8,12 @@ class StripeBot {
 
   constructor() {
     this.aiweBot = new AIWEBot({
-      openAIApiKey: process.env.OPENAI_API_KEY as string
+      openAIApiKey: process.env.OPENAI_API_KEY as string,
+      serviceCredentials: {
+        invbg: {
+          "x-api-key": process.env.INVBG_API_KEY as string
+        }
+      }
     });
   }
 
@@ -20,7 +25,7 @@ class StripeBot {
 (async () => {
   try {
     const stripeBot = new StripeBot();
-    const result = await stripeBot.executeCommand("Get my balance from stripe.com");
+    const result = await stripeBot.executeCommand("Get my invoices from invbg");
     console.log("Result:", result);
   } catch (error) {
     console.error("Error:", error);
