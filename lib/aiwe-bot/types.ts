@@ -27,7 +27,7 @@ export interface ExecutionContext {
   instruction: string;
   conversationHistory: string;
   completedActions?: Map<string, {
-    website: string;
+    serviceName: string;
     result: any;
     timestamp: number;
   }>;
@@ -36,7 +36,7 @@ export interface ExecutionContext {
 export interface ActionResult {
   status: 'success' | 'error';
   action: string;
-  website: string;
+  serviceName: string;
   result?: any;
   error?: string;
   retryCount?: number;
@@ -58,7 +58,7 @@ export interface AuthConfig {
 export interface StoredData {
   actions: {
     [actionId: string]: {
-      website: string;
+      serviceName: string;
       result: any;
       timestamp: number;
       parameters: any;

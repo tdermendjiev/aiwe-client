@@ -21,7 +21,7 @@ export class AIWEBot {
 
   private async determineWebsitesWithContext(context: ExecutionContext): Promise<AgentResponse<WebsiteInfo[]>> {
     const response = await this.openai.chat.completions.create({
-      model: "gpt-4o-mini",
+      model: "gpt-4o",
       messages: Prompts.websiteIdentification(context),
       response_format: { type: "json_object" }
     });
@@ -47,7 +47,7 @@ export class AIWEBot {
     try {
       // First, analyze if this is an actionable instruction or just a question
       const analysisResponse = await this.openai.chat.completions.create({
-        model: "gpt-4o-mini",
+        model: "gpt-4o",
         messages: Prompts.actionAnalysis(instruction, this.getDataReference()),
         response_format: { type: "json_object" }
       });
@@ -56,12 +56,12 @@ export class AIWEBot {
       
       // If the agent needs data, collect it all first
       let collectedData = {};
-      if (analysis.dataNeeded?.length) {
+      if (analysis.dataNeeded?.length && !analysis.requiresAction) {
         collectedData = await this.collectRequestedData(analysis.dataNeeded);
         
         // Now make the final decision with all data
         const finalAnalysis = await this.openai.chat.completions.create({
-          model: "gpt-4o-mini",
+          model: "gpt-4o",
           messages: Prompts.instructionAnalysis(instruction, collectedData),
           response_format: { type: "json_object" }
         });
@@ -90,7 +90,7 @@ export class AIWEBot {
       const configs = new Map();
       for (const website of websites) {
         try {
-          configs.set(website.url, await this.getAIWEConfig(website.serviceName));
+          configs.set(website.serviceName, await this.getAIWEConfig(website.serviceName));
         } catch (error: unknown) {
           const errorMessage = error instanceof Error ? error.message : 'Unknown error occurred';
           const response = await this.openai.chat.completions.create({
@@ -184,7 +184,7 @@ export class AIWEBot {
     actionPlan: any[], 
     configs: Map<string, any>,
     instruction: string,
-    completedActions?: Map<string, { website: string; result: any; timestamp: number; }>
+    completedActions?: Map<string, { serviceName: string; result: any; timestamp: number; }>
   ): Promise<any[]> {
     const orderedPlan = Utils.reorderActionPlan(actionPlan);
     const outputs = new Map();
@@ -198,12 +198,10 @@ export class AIWEBot {
       if (previousExecution && !action.alwaysExecute) {
         chatHistory.push({
           role: "assistant",
-          content: `Skipping action "${action.id}" on ${action.website} as it was already completed at ${new Date(previousExecution.timestamp).toISOString()}`
+          content: `Skipping action "${action.id}" on ${action.serviceName} as it was already completed at ${new Date(previousExecution.timestamp).toISOString()}`
         });
         
-        if (action.outputKey) {
-          outputs.set(action.outputKey, previousExecution.result);
-        }
+        outputs.set(action.id, previousExecution.result);
         continue;
       }
 
@@ -216,26 +214,26 @@ export class AIWEBot {
       }
       
       const resolvedParams = this.resolveParameters(action.parameters || {}, outputs);
-      const config = configs.get(action.website);
+      const config = configs.get(action.serviceName);
       if (!config) {
-        throw new Error(`No configuration found for website ${action.website}`);
+        throw new Error(`No configuration found for website ${action.serviceName}`);
       }
       
       let actionResult: ActionResult = {
         status: 'error',
         action: action.id,
-        website: action.website,
+        serviceName: action.serviceName,
         retryCount: 0
       };
 
       const maxRetries = 3;
       while (actionResult.retryCount! < maxRetries) {
         try {
-          const result = await this.executeAction(action.id, action.website, resolvedParams, config);
+          const result = await this.executeAction(action.id, action.serviceName, resolvedParams, config);
           actionResult = {
             status: 'success',
             action: action.id,
-            website: action.website,
+            serviceName: action.serviceName,
             result,
             retryCount: actionResult.retryCount
           };
@@ -247,7 +245,7 @@ export class AIWEBot {
           if (actionResult.retryCount! >= maxRetries) {
             chatHistory.push({
               role: "user",
-              content: `Action "${action.id}" on ${action.website} failed after ${maxRetries} attempts: ${actionResult.error}`
+              content: `Action "${action.id}" on ${action.serviceName} failed after ${maxRetries} attempts: ${actionResult.error}`
             });
 
             const response = await this.openai.chat.completions.create({
@@ -280,7 +278,7 @@ export class AIWEBot {
 
         // Store successful execution
         completedActions?.set(action.id, {
-          website: action.website,
+          serviceName: action.serviceName,
           result: actionResult.result,
           timestamp: Date.now()
         });
@@ -289,13 +287,13 @@ export class AIWEBot {
         actionResults.push({
           status: 'success',
           action: action.id,
-          website: action.website,
+          serviceName: action.serviceName,
           result: actionResult.result
         });
 
         // Store the action result
         this.dataStore.actions[action.id] = {
-          website: action.website,
+          serviceName: action.serviceName,
           result: actionResult.result,
           timestamp: Date.now(),
           parameters: resolvedParams
@@ -304,7 +302,7 @@ export class AIWEBot {
         actionResults.push({
           status: 'error',
           action: action.id,
-          website: action.website,
+          serviceName: action.serviceName,
           error: actionResult.error
         });
       }
@@ -313,31 +311,11 @@ export class AIWEBot {
     // Now process all results at once
     const finalResponse = await this.openai.chat.completions.create({
       model: "gpt-4o-mini",
-      messages: Prompts.finalAnalysis(actionResults, this.getDataReference()),
+      messages: Prompts.finalAnalysis(actionResults, instruction),
       response_format: { type: "json_object" }
     });
 
     const finalResult = JSON.parse(finalResponse.choices[0].message?.content || "{}");
-
-    // If historical data is needed, get it all at once
-    if (finalResult.dataNeeded?.length) {
-      const historicalData = await this.collectRequestedData(finalResult.dataNeeded);
-
-      // Final analysis with all data
-      const completeResponse = await this.openai.chat.completions.create({
-        model: "gpt-4o-mini",
-        messages: Prompts.finalAnalysisWithHistory(actionResults, historicalData),
-        response_format: { type: "json_object" }
-      });
-
-      const completeResult = JSON.parse(completeResponse.choices[0].message?.content || "{}");
-      
-      // Store the final response
-      this.dataStore.conversations[this.dataStore.conversations.length - 1].response = completeResult.summary;
-
-      return [completeResult.summary];
-    }
-
     // If no historical data needed, use the initial final result
     this.dataStore.conversations[this.dataStore.conversations.length - 1].response = finalResult.summary;
     return [finalResult.summary];
@@ -369,7 +347,7 @@ export class AIWEBot {
     }, {} as Record<string, string>);
   }
 
-  private async executeAction(actionId: string, website: string, params: any, config: any): Promise<any> {
+  private async executeAction(actionId: string, serviceName: string, params: any, config: any): Promise<any> {
     try {
       const source = this.configSources.get(config.service);
       
@@ -384,7 +362,7 @@ export class AIWEBot {
           const headers = this.resolveAuthHeaders(config.service, config.authentication);
 
           if (source === 'official') {
-            const response = await axios.post(`https://${website}/ai-action`, {
+            const response = await axios.post(`https://${serviceName}/ai-action`, {
               action: actionId,
               parameters: params
             }, { headers });
@@ -459,7 +437,7 @@ export class AIWEBot {
     return {
       actions: Object.entries(this.dataStore.actions).reduce((ref, [id, action]) => {
         ref[id] = {
-          description: `Action ${id} on ${action.website} with parameters: ${Object.keys(action.parameters).join(', ')}`,
+          description: `Action ${id} on ${action.serviceName} with parameters: ${Object.keys(action.parameters).join(', ')}`,
           timestamp: action.timestamp
         };
         return ref;

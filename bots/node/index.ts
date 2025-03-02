@@ -25,7 +25,8 @@ class StripeBot {
 (async () => {
   try {
     const stripeBot = new StripeBot();
-    const result = await stripeBot.executeCommand("Get my invoices from invbg");
+    console.log('Starting...')
+    const result = await stripeBot.executeCommand("What is my last invoice in invbg (inv.bg), the service name is invbg? Who is the client and what is the amount due? Get the list of invoices, then find the last one and tell me the information.");
     console.log("Result:", result);
   } catch (error) {
     console.error("Error:", error);

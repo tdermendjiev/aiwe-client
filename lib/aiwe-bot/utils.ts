@@ -53,30 +53,32 @@ class Utils {
     });
   }
 
-  public reorderActionPlan(actionPlan: any[]): any[] {
-    const orderedPlan: any[] = [];
-    const availableOutputs = new Set<string>();
-    const unprocessedActions = [...actionPlan];
-
-    while (unprocessedActions.length > 0) {
-      const actionIndex = unprocessedActions.findIndex(action => {
-        return !action.dependsOn || 
-               action.dependsOn.every((dep: string) => availableOutputs.has(dep));
-      });
-
-      if (actionIndex === -1) {
-        throw new Error("Circular dependency detected in action plan");
-      }
-
-      const nextAction = unprocessedActions.splice(actionIndex, 1)[0];
-      orderedPlan.push(nextAction);
-
-      if (nextAction.outputKey) {
-        availableOutputs.add(nextAction.outputKey);
-      }
+  public reorderActionPlan(actions: any[]): any[] {
+    const actionMap = new Map<string, { id: string; website: string; parameters: any; outputKey: string; dependsOn?: string[] }>();
+    const sortedActions: Array<{ id: string; website: string; parameters: any; outputKey: string; dependsOn?: string[] }> = [];
+    const visited = new Set<string>();
+    
+    // Create a map for quick access
+    actions.forEach(action => actionMap.set(action.id, action));
+    
+    function visit(action: { id: string; website: string; parameters: any; outputKey: string; dependsOn?: string[] }) {
+        if (visited.has(action.id)) return;
+        
+        if (action.dependsOn) {
+            action.dependsOn.forEach(dependencyId => {
+                if (actionMap.has(dependencyId)) {
+                    visit(actionMap.get(dependencyId)!);
+                }
+            });
+        }
+        
+        visited.add(action.id);
+        sortedActions.push(action);
     }
-
-    return orderedPlan;
+    
+    actions.forEach(action => visit(action));
+    
+    return sortedActions;
   }
   
 }

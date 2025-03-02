@@ -23,16 +23,18 @@ export class Prompts {
     return [
       {
         role: "system",
-        content: `Analyze if this instruction requires executing actions on websites or is just a question/conversation.
-          Available data reference:
+        content: `You are a helpful assistant with access to the following services: invbg, stripe, mixpanel. 
+        Analyze if this instruction requires executing actions on any of these services or is just a question/conversation.
+          Available data reference that you can use to directly construct the response:
           ${JSON.stringify(dataReference, null, 2)}
 
-          If you need specific data, include "dataNeeded": ["action-id"] in your response.
+          If you need specific data, include "dataNeeded": "description of the data" in your response.
           
           Respond in json with format: {
-            "requiresAction": true|false,
+            "requiresAction": true|false (if the dataNeeded is available above respond with false),
             "response": "your message",
-            "dataNeeded": ["list of action IDs if you need their data"],
+            "dataNeeded": "what data",
+            "serviceName": "the name of the service in lowercase (like invbg) that the action should be executed upon or the data fetched from"
             "reason": "why you need this data (if any)"
           }`
       },
@@ -58,27 +60,21 @@ export class Prompts {
     ];
   }
 
-  static finalAnalysis(actionResults: ActionResult[], dataReference: any): ChatCompletionMessageParam[] {
+  static finalAnalysis(actionResults: ActionResult[], task: string): ChatCompletionMessageParam[] {
     return [
       {
         role: "system",
-        content: `Analyze all executed actions and their results:
+        content: `Use the provided below action results to generate a response for the following task:
+          Task:
+          ${task}
           Action Results: ${JSON.stringify(actionResults, null, 2)}
-          
-          Available data reference:
-          ${JSON.stringify(dataReference, null, 2)}
-
-          If you need additional historical data to provide better context, include "dataNeeded" in your response.
-          
-          Provide a complete analysis in JSON format: {
-            "summary": "Complete summary of what was accomplished",
-            "results": {
-              "successful": ["List of successful actions with their outcomes"],
-              "failed": ["List of failed actions with error details"]
-            },
-            "dataNeeded": ["IDs of relevant historical actions to consider"],
-            "reason": "Why you need this historical data"
-          }`
+          Respond with json formatted as:
+          {
+            "completed": <is the job complete>,
+            "summary": <the results of the job",
+            "dataNeeded": <any additional context needed if the job is not complete, else undefined>
+          }
+          `
       }
     ];
   }
@@ -97,7 +93,7 @@ export class Prompts {
   static actionPlanning(
     context: ExecutionContext, 
     configs: any, 
-    completedActions?: Map<string, { website: string; result: any; timestamp: number; }>
+    completedActions?: Map<string, { serviceName: string; result: any; timestamp: number; }>
   ): ChatCompletionMessageParam[] {
     return [
       {
@@ -113,10 +109,9 @@ export class Prompts {
               "actions": [
                 {
                   "id": "actionName",                 // The name of the action from the config
-                  "website": "service.com",           // The website URL
+                  "serviceName": "serviceName",           // The name of the service
                   "parameters": {},                   // Parameters required by the action
                   "dependsOn": ["previousActionId"],  // Optional: IDs of actions this depends on
-                  "outputKey": "uniqueKey",          // Optional: key to store the output for other actions
                   "alwaysExecute": false             // Optional: whether to execute even if previously completed
                 }
               ]
@@ -125,7 +120,7 @@ export class Prompts {
 
           Consider these already completed actions (don't repeat unless necessary):
           ${Array.from(completedActions?.entries() || [])
-            .map(([id, action]) => `${id} on ${action.website} (${new Date(action.timestamp).toISOString()})`)
+            .map(([id, action]) => `${id} on ${action.serviceName} (${new Date(action.timestamp).toISOString()})`)
             .join('\n')}
           Previous context: ${context.conversationHistory}`
       },

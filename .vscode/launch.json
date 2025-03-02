@@ -10,7 +10,6 @@
             "skipFiles": [
                 "<node_internals>/**"
             ],
-            "envFile": "${workspaceFolder}/bots/node/.env",
             "console": "integratedTerminal"
         }
     ]
