@@ -19,6 +19,7 @@ import Utils from "./utils";
 import { Prompts } from './prompts';
 import { SessionManager } from './session-manager';
 import { ConsoleLogger } from './logger';
+import { AI_MODEL, DEFAULT_SERVER_API, RESPONSE_TYPE } from "./configuration/config";
 
 export class AIWEBot {
   private openai: OpenAI;
@@ -57,9 +58,9 @@ export class AIWEBot {
       // First, analyze if this is an actionable message or just a question
       this.logger.debug('Analyzing message for action requirements');
       const analysisResponse = await this.openai.chat.completions.create({
-        model: "gpt-4o",
+        model: AI_MODEL,
         messages: Prompts.actionAnalysis(message, this.getDataReference()),
-        response_format: { type: "json_object" }
+        response_format: { type: RESPONSE_TYPE }
       });
 
       let analysis = JSON.parse(analysisResponse.choices[0].message?.content || "{}");
@@ -73,9 +74,9 @@ export class AIWEBot {
         
         // Now make the final decision with all data
         const finalAnalysis = await this.openai.chat.completions.create({
-          model: "gpt-4o",
+          model: AI_MODEL,
           messages: Prompts.instructionAnalysis(message, collectedData),
-          response_format: { type: "json_object" }
+          response_format: { type: RESPONSE_TYPE }
         });
 
         analysis = JSON.parse(finalAnalysis.choices[0].message?.content || "{}");
@@ -120,9 +121,9 @@ export class AIWEBot {
           const errorMessage = error instanceof Error ? error.message : 'Unknown error occurred';
           this.logger.error(`Failed to get config for ${website.serviceName}: ${errorMessage}`);
           const aiResponse = await this.openai.chat.completions.create({
-            model: "gpt-4o-mini",
+            model: AI_MODEL,
             messages: Prompts.configError(website.serviceName, errorMessage),
-            response_format: { type: "json_object" }
+            response_format: { type: RESPONSE_TYPE }
           });
           
           const errorResult = JSON.parse(aiResponse.choices[0].message?.content || "{}");
@@ -138,9 +139,9 @@ export class AIWEBot {
       // Action planning step
       this.logger.debug('Planning actions');
       const planResponse = await this.openai.chat.completions.create({
-        model: "gpt-4o-mini",
+        model: AI_MODEL,
         messages: Prompts.actionPlanning(context, Object.fromEntries(configs), context.completedActions),
-        response_format: { type: "json_object" }
+        response_format: { type: RESPONSE_TYPE }
       });
 
       const planResult = JSON.parse(planResponse.choices[0].message?.content || "{}");
@@ -187,9 +188,9 @@ export class AIWEBot {
 
   private async determineWebsitesWithContext(context: ExecutionContext): Promise<AgentResponse<WebsiteInfo[]>> {
     const response = await this.openai.chat.completions.create({
-      model: "gpt-4o",
+      model: AI_MODEL,
       messages: Prompts.websiteIdentification(context),
-      response_format: { type: "json_object" }
+      response_format: { type: RESPONSE_TYPE }
     });
 
     return JSON.parse(response.choices[0].message?.content || "{}");
@@ -210,7 +211,7 @@ export class AIWEBot {
     } catch (error) {
       try {
         // Try aiwe.cloud manifest using service name
-        const cloudResponse = await axios.get(`http://localhost:3000/${serviceName}/.aiwe`);
+        const cloudResponse = await axios.get(`${DEFAULT_SERVER_API}/${serviceName}/.aiwe`);
         const cloudConfig = cloudResponse.data;
 
         if (!Utils.isValidAIWEConfig(cloudConfig)) {
@@ -306,9 +307,9 @@ export class AIWEBot {
             });
 
             const response = await this.openai.chat.completions.create({
-              model: "gpt-4o-mini",
+              model: AI_MODEL,
               messages: Prompts.errorHandling(actionResult.error || 'Unknown error', chatHistory),
-              response_format: { type: "json_object" }
+              response_format: { type: RESPONSE_TYPE }
             });
 
             const decision = JSON.parse(response.choices[0].message?.content || "{}");
@@ -367,9 +368,9 @@ export class AIWEBot {
     // Now process all results at once
     this.logger.debug('Generating final summary');
     const finalResponse = await this.openai.chat.completions.create({
-      model: "gpt-4o-mini",
+      model: AI_MODEL,
       messages: Prompts.finalAnalysis(actionResults, message),
-      response_format: { type: "json_object" }
+      response_format: { type: RESPONSE_TYPE }
     });
 
     const finalResult = JSON.parse(finalResponse.choices[0].message?.content || "{}");
@@ -425,7 +426,7 @@ export class AIWEBot {
             return response.data;
           } else {
             const response = await axios.post(
-              `http://localhost:3000/${config.service}/${actionId}`, 
+              `${DEFAULT_SERVER_API}/${config.service}/${actionId}`, 
               params,
               { headers }
             );
