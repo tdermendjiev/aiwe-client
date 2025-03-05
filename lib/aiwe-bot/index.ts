@@ -19,7 +19,7 @@ import Utils from "./utils";
 import { Prompts } from './prompts';
 import { SessionManager } from './session-manager';
 import { ConsoleLogger } from './logger';
-import { AI_MODEL, DEFAULT_SERVER_API, RESPONSE_TYPE } from "./configuration/config";
+import { AI_MODEL, AI_MODEL_TEMP, DEFAULT_SERVER_API, RESPONSE_TYPE } from "./configuration/config";
 
 export class AIWEBot {
   private openai: OpenAI;
@@ -59,6 +59,7 @@ export class AIWEBot {
       this.logger.debug('Analyzing message for action requirements');
       const analysisResponse = await this.openai.chat.completions.create({
         model: AI_MODEL,
+        temperature: AI_MODEL_TEMP,
         messages: Prompts.actionAnalysis(message, this.getDataReference()),
         response_format: { type: RESPONSE_TYPE }
       });
@@ -75,6 +76,7 @@ export class AIWEBot {
         // Now make the final decision with all data
         const finalAnalysis = await this.openai.chat.completions.create({
           model: AI_MODEL,
+          temperature: AI_MODEL_TEMP,
           messages: Prompts.instructionAnalysis(message, collectedData),
           response_format: { type: RESPONSE_TYPE }
         });
@@ -140,6 +142,7 @@ export class AIWEBot {
       this.logger.debug('Planning actions');
       const planResponse = await this.openai.chat.completions.create({
         model: AI_MODEL,
+        temperature: AI_MODEL_TEMP,
         messages: Prompts.actionPlanning(context, Object.fromEntries(configs), context.completedActions),
         response_format: { type: RESPONSE_TYPE }
       });
@@ -369,6 +372,7 @@ export class AIWEBot {
     this.logger.debug('Generating final summary');
     const finalResponse = await this.openai.chat.completions.create({
       model: AI_MODEL,
+      temperature: AI_MODEL_TEMP,
       messages: Prompts.finalAnalysis(actionResults, message),
       response_format: { type: RESPONSE_TYPE }
     });
