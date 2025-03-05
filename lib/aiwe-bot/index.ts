@@ -1,22 +1,188 @@
 import { OpenAI } from "openai";
 import axios from "axios";
 import { communityBridges } from "./community-bridges";
-import { AIWEBotOptions, ExecutionContext, AgentResponse, WebsiteInfo, ConversationResponse, StoredData, DataReference, CommunityBridge, ActionResult, DataRequest } from "./types";
+import { 
+  AIWEBotOptions, 
+  ExecutionContext, 
+  AgentResponse, 
+  WebsiteInfo, 
+  ConversationResponse, 
+  StoredData, 
+  DataReference, 
+  CommunityBridge, 
+  ActionResult, 
+  DataRequest,
+  Session,
+  Logger
+} from "./types";
 import Utils from "./utils";
 import { Prompts } from './prompts';
+import { SessionManager } from './session-manager';
+import { ConsoleLogger } from './logger';
 
 export class AIWEBot {
   private openai: OpenAI;
   private configSources = new Map<string, 'official' | 'bridge' | 'aiwe.cloud'>();
   private serviceCredentials: Record<string, Record<string, string>>;
   private dataStore: StoredData = {
-    actions: {},
-    conversations: []
+    actions: {}
   };
+  private sessionManager: SessionManager;
+  private logger: Logger;
 
   constructor(options: AIWEBotOptions) {
     this.openai = new OpenAI({ apiKey: options.openAIApiKey });
     this.serviceCredentials = options.serviceCredentials || {};
+    this.logger = options.logger || new ConsoleLogger();
+    this.sessionManager = new SessionManager(this.logger);
+  }
+
+  async processMessage(message: string, sessionId?: string): Promise<ConversationResponse> {
+    try {
+      this.logger.info(`Processing message${sessionId ? ` in session ${sessionId}` : ''}`);
+      let session: Session;
+      
+      if (sessionId) {
+        session = this.sessionManager.getSession(sessionId)!;
+        if (!session) {
+          throw new Error(`Invalid session ID: ${sessionId}`);
+        }
+        session = this.sessionManager.addMessage(session, message);
+      } else {
+        session = this.sessionManager.createSession(message);
+      }
+
+      const context = this.sessionManager.getSessionContext(session);
+
+      // First, analyze if this is an actionable message or just a question
+      this.logger.debug('Analyzing message for action requirements');
+      const analysisResponse = await this.openai.chat.completions.create({
+        model: "gpt-4o",
+        messages: Prompts.actionAnalysis(message, this.getDataReference()),
+        response_format: { type: "json_object" }
+      });
+
+      let analysis = JSON.parse(analysisResponse.choices[0].message?.content || "{}");
+      this.logger.debug('LLM Analysis:', analysis);
+      
+      // If the agent needs data, collect it all first
+      let collectedData = {};
+      if (analysis.dataNeeded?.length && !analysis.requiresAction) {
+        this.logger.debug('Collecting required data');
+        collectedData = await this.collectRequestedData(analysis.dataNeeded);
+        
+        // Now make the final decision with all data
+        const finalAnalysis = await this.openai.chat.completions.create({
+          model: "gpt-4o",
+          messages: Prompts.instructionAnalysis(message, collectedData),
+          response_format: { type: "json_object" }
+        });
+
+        analysis = JSON.parse(finalAnalysis.choices[0].message?.content || "{}");
+        this.logger.debug('LLM Final Analysis:', analysis);
+      }
+
+      // If it's just a conversation, respond directly
+      if (!analysis.requiresAction) {
+        this.logger.debug('Responding to conversational message');
+        const response = analysis.response;
+        this.sessionManager.updateSession(session, response);
+        return {
+          response,
+          sessionId: session.id
+        };
+      }
+
+      // Website determination step
+      this.logger.debug('Determining relevant websites');
+      const websiteResponse = await this.determineWebsitesWithContext(context);
+      this.logger.debug('LLM Website Determination:', websiteResponse);
+      if (websiteResponse.status === 'needsClarification') {
+        const response = websiteResponse.question!;
+        this.sessionManager.updateSession(session, response);
+        return {
+          response,
+          sessionId: session.id
+        };
+      }
+
+      const websites = websiteResponse.data!;
+      this.logger.info(`Identified websites: ${websites.map(w => w.serviceName).join(', ')}`);
+
+      // Config gathering step
+      this.logger.debug('Gathering website configurations');
+      const configs = new Map();
+      for (const website of websites) {
+        try {
+          configs.set(website.serviceName, await this.getAIWEConfig(website.serviceName));
+          this.logger.debug(`Retrieved config for ${website.serviceName}`);
+        } catch (error: unknown) {
+          const errorMessage = error instanceof Error ? error.message : 'Unknown error occurred';
+          this.logger.error(`Failed to get config for ${website.serviceName}: ${errorMessage}`);
+          const aiResponse = await this.openai.chat.completions.create({
+            model: "gpt-4o-mini",
+            messages: Prompts.configError(website.serviceName, errorMessage),
+            response_format: { type: "json_object" }
+          });
+          
+          const errorResult = JSON.parse(aiResponse.choices[0].message?.content || "{}");
+          const response = errorResult.response || `Failed to get configuration for ${website.serviceName}`;
+          this.sessionManager.updateSession(session, response);
+          return {
+            response,
+            sessionId: session.id
+          };
+        }
+      }
+
+      // Action planning step
+      this.logger.debug('Planning actions');
+      const planResponse = await this.openai.chat.completions.create({
+        model: "gpt-4o-mini",
+        messages: Prompts.actionPlanning(context, Object.fromEntries(configs), context.completedActions),
+        response_format: { type: "json_object" }
+      });
+
+      const planResult = JSON.parse(planResponse.choices[0].message?.content || "{}");
+      this.logger.debug('LLM Action Plan:', JSON.stringify(planResult, null, 2));
+      
+      if (planResult.status === 'needsInfo') {
+        this.logger.debug('Requesting additional information');
+        const response = planResult.question;
+        this.sessionManager.updateSession(session, response);
+        return {
+          response,
+          sessionId: session.id
+        };
+      }
+
+      // Execute the plan
+      this.logger.info(`Executing plan with ${planResult.plan.actions.length} actions`);
+      const results = await this.executePlan(planResult.plan.actions, configs, message, context.completedActions);
+      
+      const response = results[results.length - 1];
+      this.sessionManager.updateSession(session, response);
+      
+      return {
+        response,
+        executionResults: results,
+        sessionId: session.id
+      };
+
+    } catch (error: unknown) {
+      const errorMessage = error instanceof Error ? error.message : 'An unknown error occurred';
+      this.logger.error(`Error processing message: ${errorMessage}`);
+      if (sessionId) {
+        const session = this.sessionManager.getSession(sessionId);
+        if (session) {
+          this.sessionManager.updateSession(session, `Error: ${errorMessage}`);
+        }
+      }
+      return {
+        response: `Error: ${errorMessage}`,
+        sessionId: sessionId || ''
+      };
+    }
   }
 
   private async determineWebsitesWithContext(context: ExecutionContext): Promise<AgentResponse<WebsiteInfo[]>> {
@@ -27,120 +193,6 @@ export class AIWEBot {
     });
 
     return JSON.parse(response.choices[0].message?.content || "{}");
-  }
-
-  async processInstruction(instruction: string): Promise<ConversationResponse> {
-    // Store the instruction
-    const timestamp = Date.now();
-    this.dataStore.conversations.push({
-      timestamp,
-      instruction,
-      response: '' // Will be updated later
-    });
-
-    let context: ExecutionContext = {
-      instruction,
-      conversationHistory: '',
-      completedActions: new Map()
-    };
-
-    try {
-      // First, analyze if this is an actionable instruction or just a question
-      const analysisResponse = await this.openai.chat.completions.create({
-        model: "gpt-4o",
-        messages: Prompts.actionAnalysis(instruction, this.getDataReference()),
-        response_format: { type: "json_object" }
-      });
-
-      let analysis = JSON.parse(analysisResponse.choices[0].message?.content || "{}");
-      
-      // If the agent needs data, collect it all first
-      let collectedData = {};
-      if (analysis.dataNeeded?.length && !analysis.requiresAction) {
-        collectedData = await this.collectRequestedData(analysis.dataNeeded);
-        
-        // Now make the final decision with all data
-        const finalAnalysis = await this.openai.chat.completions.create({
-          model: "gpt-4o",
-          messages: Prompts.instructionAnalysis(instruction, collectedData),
-          response_format: { type: "json_object" }
-        });
-
-        analysis = JSON.parse(finalAnalysis.choices[0].message?.content || "{}");
-      }
-
-      // If it's just a conversation, respond directly
-      if (!analysis.requiresAction) {
-        return {
-          response: analysis.response
-        };
-      }
-
-      // Website determination step
-      const websiteResponse = await this.determineWebsitesWithContext(context);
-      if (websiteResponse.status === 'needsClarification') {
-        return {
-          response: websiteResponse.question!
-        };
-      }
-
-      const websites = websiteResponse.data!;
-
-      // Config gathering step
-      const configs = new Map();
-      for (const website of websites) {
-        try {
-          configs.set(website.serviceName, await this.getAIWEConfig(website.serviceName));
-        } catch (error: unknown) {
-          const errorMessage = error instanceof Error ? error.message : 'Unknown error occurred';
-          const response = await this.openai.chat.completions.create({
-            model: "gpt-4o-mini",
-            messages: Prompts.configError(website.serviceName, errorMessage),
-            response_format: { type: "json_object" }
-          });
-          
-          const errorResult = JSON.parse(response.choices[0].message?.content || "{}");
-          return {
-            response: errorResult.response || `Failed to get configuration for ${website.serviceName}`
-          };
-        }
-      }
-
-      // Action planning step
-      const planResponse = await this.openai.chat.completions.create({
-        model: "gpt-4o-mini",
-        messages: Prompts.actionPlanning(context, Object.fromEntries(configs), context.completedActions),
-        response_format: { type: "json_object" }
-      });
-
-      const planResult = JSON.parse(planResponse.choices[0].message?.content || "{}");
-      
-      // If we need more information, ask the user
-      if (planResult.status === 'needsInfo') {
-        return {
-          response: planResult.question
-        };
-      }
-
-      // If we have everything we need, execute the plan
-      const results = await this.executePlan(planResult.plan.actions, configs, context.instruction, context.completedActions);
-
-      // Return both the execution results and a human-readable summary
-      return {
-        response: results[results.length - 1], // The final summary
-        executionResults: results
-      };
-
-    } catch (error: unknown) {
-      if (error instanceof Error) {
-        return {
-          response: `Error: ${error.message}`
-        };
-      }
-      return {
-        response: 'An unknown error occurred'
-      };
-    }
   }
 
   private async getAIWEConfig(serviceName: string) {
@@ -183,7 +235,7 @@ export class AIWEBot {
   private async executePlan(
     actionPlan: any[], 
     configs: Map<string, any>,
-    instruction: string,
+    message: string,
     completedActions?: Map<string, { serviceName: string; result: any; timestamp: number; }>
   ): Promise<any[]> {
     const orderedPlan = Utils.reorderActionPlan(actionPlan);
@@ -193,9 +245,12 @@ export class AIWEBot {
 
     // Execute all actions first
     for (const action of orderedPlan) {
+      this.logger.info(`Executing action ${action.id} on ${action.serviceName}`);
+      
       // Skip if action was already completed successfully (unless it's marked as required to repeat)
       const previousExecution = completedActions?.get(action.id);
       if (previousExecution && !action.alwaysExecute) {
+        this.logger.debug(`Skipping already completed action ${action.id}`);
         chatHistory.push({
           role: "assistant",
           content: `Skipping action "${action.id}" on ${action.serviceName} as it was already completed at ${new Date(previousExecution.timestamp).toISOString()}`
@@ -237,12 +292,14 @@ export class AIWEBot {
             result,
             retryCount: actionResult.retryCount
           };
+          this.logger.info(`Successfully executed action ${action.id}`);
           break;
         } catch (error) {
           actionResult.retryCount!++;
           actionResult.error = error instanceof Error ? error.message : 'Unknown error';
           
           if (actionResult.retryCount! >= maxRetries) {
+            this.logger.error(`Action ${action.id} failed after ${maxRetries} attempts: ${actionResult.error}`);
             chatHistory.push({
               role: "user",
               content: `Action "${action.id}" on ${action.serviceName} failed after ${maxRetries} attempts: ${actionResult.error}`
@@ -255,18 +312,19 @@ export class AIWEBot {
             });
 
             const decision = JSON.parse(response.choices[0].message?.content || "{}");
+            this.logger.debug('LLM Error Handling Decision:', decision);
             
             if (decision.decision === 'stop') {
               throw new Error(`Fatal error in action ${action.id}: ${actionResult.error}\nReason: ${decision.reason}`);
             } else if (decision.decision === 'retry') {
-              actionResult.retryCount = 0; // Reset retry count to try again
+              this.logger.debug(`Retrying action ${action.id}`);
+              actionResult.retryCount = 0;
               continue;
             }
-            // If decision is 'continue', we'll break the retry loop and move to next action
             break;
           }
           
-          // If we haven't hit max retries, wait before trying again
+          this.logger.debug(`Retrying action ${action.id} (attempt ${actionResult.retryCount})`);
           await new Promise(resolve => setTimeout(resolve, 1000 * actionResult.retryCount!));
         }
       }
@@ -276,14 +334,12 @@ export class AIWEBot {
           outputs.set(action.outputKey, actionResult.result);
         }
 
-        // Store successful execution
         completedActions?.set(action.id, {
           serviceName: action.serviceName,
           result: actionResult.result,
           timestamp: Date.now()
         });
 
-        // Store in our results array
         actionResults.push({
           status: 'success',
           action: action.id,
@@ -291,7 +347,6 @@ export class AIWEBot {
           result: actionResult.result
         });
 
-        // Store the action result
         this.dataStore.actions[action.id] = {
           serviceName: action.serviceName,
           result: actionResult.result,
@@ -299,6 +354,7 @@ export class AIWEBot {
           parameters: resolvedParams
         };
       } else {
+        this.logger.error(`Action ${action.id} failed: ${actionResult.error}`);
         actionResults.push({
           status: 'error',
           action: action.id,
@@ -309,15 +365,15 @@ export class AIWEBot {
     }
 
     // Now process all results at once
+    this.logger.debug('Generating final summary');
     const finalResponse = await this.openai.chat.completions.create({
       model: "gpt-4o-mini",
-      messages: Prompts.finalAnalysis(actionResults, instruction),
+      messages: Prompts.finalAnalysis(actionResults, message),
       response_format: { type: "json_object" }
     });
 
     const finalResult = JSON.parse(finalResponse.choices[0].message?.content || "{}");
-    // If no historical data needed, use the initial final result
-    this.dataStore.conversations[this.dataStore.conversations.length - 1].response = finalResult.summary;
+    this.logger.debug('LLM Final Summary:', finalResult);
     return [finalResult.summary];
   }
 
@@ -442,9 +498,9 @@ export class AIWEBot {
         };
         return ref;
       }, {} as DataReference['actions']),
-      conversations: {
-        count: this.dataStore.conversations.length,
-        lastTimestamp: this.dataStore.conversations[this.dataStore.conversations.length - 1]?.timestamp || 0
+      sessions: {
+        count: this.sessionManager.getSessionsCount(),
+        lastTimestamp: this.sessionManager.getLastSessionTimestamp()
       }
     };
   }

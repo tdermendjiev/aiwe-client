@@ -1,6 +1,13 @@
+export interface Logger {
+  info(message: string, ...args: any[]): void;
+  error(message: string, ...args: any[]): void;
+  debug(message: string, ...args: any[]): void;
+}
+
 export interface AIWEBotOptions {
   openAIApiKey: string;
   serviceCredentials?: Record<string, Record<string, string>>;  // e.g. { "invbg": { "x-api-key": "key123" } }
+  logger?: Logger;
 }
 
 export interface CommunityBridge {
@@ -24,7 +31,7 @@ export interface AgentResponse<T> {
 }
 
 export interface ExecutionContext {
-  instruction: string;
+  message: string;
   conversationHistory: string;
   completedActions?: Map<string, {
     serviceName: string;
@@ -44,7 +51,8 @@ export interface ActionResult {
 
 export interface ConversationResponse {
   response: string;
-  executionResults?: any;
+  executionResults?: any[];
+  sessionId: string;
 }
 
 export interface AuthConfig {
@@ -56,18 +64,22 @@ export interface AuthConfig {
 }
 
 export interface StoredData {
-  actions: {
-    [actionId: string]: {
-      serviceName: string;
-      result: any;
-      timestamp: number;
-      parameters: any;
-    }
-  };
-  conversations: {
+  actions: Record<string, {
+    serviceName: string;
+    result: any;
     timestamp: number;
-    instruction: string;
-    response: string;
+    parameters: Record<string, any>;
+  }>;
+}
+
+export interface Session {
+  id: string;
+  startTime: number;
+  lastUpdateTime: number;
+  messages: {
+    role: 'user' | 'assistant';
+    content: string;
+    timestamp: number;
   }[];
 }
 
@@ -78,7 +90,7 @@ export interface DataReference {
       timestamp: number;
     }
   };
-  conversations: {
+  sessions: {
     count: number;
     lastTimestamp: number;
   };

@@ -18,7 +18,7 @@ class StripeBot {
   }
 
   async executeCommand(command: string): Promise<any> {
-    return await this.aiweBot.processInstruction(command);
+    return await this.aiweBot.processMessage(command);
   }
 }
 
@@ -26,7 +26,7 @@ class StripeBot {
   try {
     const stripeBot = new StripeBot();
     console.log('Starting...')
-    const result = await stripeBot.executeCommand("What is my last invoice in invbg (inv.bg), the service name is invbg? Who is the client and what is the amount due? Get the list of invoices, then find the last one and tell me the information.");
+    const result = await stripeBot.executeCommand("What is my last invoice in invbg (inv.bg), the service name is invbg. Who is the client and what is the amount due? Get the list of invoices, then find the last one and tell me the information.");
     console.log("Result:", result);
   } catch (error) {
     console.error("Error:", error);

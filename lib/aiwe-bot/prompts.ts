@@ -14,7 +14,7 @@ export class Prompts {
       },
       { 
         role: "user", 
-        content: context.instruction 
+        content: context.message 
       }
     ];
   }
@@ -126,7 +126,7 @@ export class Prompts {
       },
       {
         role: "user",
-        content: `Instruction: ${context.instruction}
+        content: `Instruction: ${context.message}
           Available actions: ${JSON.stringify(configs)}
           Previous results: ${JSON.stringify(Object.fromEntries(completedActions || new Map()))}
           Respond in json format as specified above.`
