@@ -1,0 +1,14 @@
+{
+    "typescript.tsdk": "backend/node_modules/typescript/lib",
+    "debug.javascript.autoAttachFilter": "always",
+    "debug.javascript.terminalOptions": {
+        "skipFiles": [
+            "<node_internals>/**"
+        ]
+    },
+    "debug.javascript.usePreview": true,
+    "debug.javascript.sourceMaps": true,
+    "debug.javascript.unmapMissingSources": true,
+    "js/ts.implicitProjectConfig.experimentalDecorators": true,
+    "js/ts.implicitProjectConfig.checkJs": false
+} 

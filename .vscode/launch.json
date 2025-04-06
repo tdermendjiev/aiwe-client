@@ -10,7 +10,47 @@
             "skipFiles": [
                 "<node_internals>/**"
             ],
-            "console": "integratedTerminal"
+            "console": "integratedTerminal",
+            "sourceMaps": true,
+            "protocol": "inspector"
+        },
+        {
+            "type": "node",
+            "request": "launch",
+            "name": "Launch Express Backend",
+            "runtimeExecutable": "node",
+            "args": [
+                "-r",
+                "ts-node/register",
+                "${workspaceFolder}/backend/src/index.ts"
+            ],
+            "skipFiles": [
+                "<node_internals>/**"
+            ],
+            "sourceMaps": true,
+            "cwd": "${workspaceFolder}/backend",
+            "console": "integratedTerminal",
+            "protocol": "inspector"
+        },
+        {
+            "type": "node",
+            "request": "launch",
+            "name": "Run Backend Test Client",
+            "program": "${workspaceFolder}/backend/src/test-client.ts",
+            "runtimeExecutable": "ts-node",
+            "skipFiles": [
+                "<node_internals>/**"
+            ],
+            "console": "integratedTerminal",
+            "sourceMaps": true,
+            "protocol": "inspector",
+            "cwd": "${workspaceFolder}/backend"
+        }
+    ],
+    "compounds": [
+        {
+            "name": "Backend + Test Client",
+            "configurations": ["Launch Express Backend", "Run Backend Test Client"]
         }
     ]
 }
