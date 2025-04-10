@@ -223,6 +223,7 @@ export class AIWEBot {
       } catch (cloudError) {
         // Fallback to community bridge
         const bridge = communityBridges[serviceName] as CommunityBridge;
+        console.log('>communityBridges', communityBridges)
         if (bridge) {
           this.configSources.set(serviceName, 'bridge');
           return bridge.config;
@@ -425,6 +426,7 @@ export class AIWEBot {
             }, { headers });
             return response.data;
           } else {
+            console.log('>>axios', `${DEFAULT_SERVER_API}/${config.service}/${actionId}`)
             const response = await axios.post(
               `${DEFAULT_SERVER_API}/${config.service}/${actionId}`, 
               params,

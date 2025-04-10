@@ -18,12 +18,18 @@ export class Prompts {
       }
     ];
   }
-
+  /**
+   * @todo: It took me significant amount of time to find that this prompt handles which services ara available
+   * Think of an automatization.
+   * @param instruction 
+   * @param dataReference 
+   * @returns 
+   */
   static actionAnalysis(instruction: string, dataReference: any): ChatCompletionMessageParam[] {
     return [
       {
         role: "system",
-        content: `You are a helpful assistant with access to the following services: invbg, stripe, mixpanel. 
+        content: `You are a helpful assistant with access to the following services: invbg, stripe, mixpanel, googledrive. 
         Analyze if this instruction requires executing actions on any of these services or is just a question/conversation.
           Available data reference that you can use to directly construct the response:
           ${JSON.stringify(dataReference, null, 2)}
